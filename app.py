@@ -22,6 +22,8 @@ pdf_semaphore=asyncio.Semaphore(5)
 api_semaphore=asyncio.Semaphore(5)
 app=FastAPI(title="PDF-Audit-API",summary="PDF审核API",version="2.0.0")
 
+
+
 class PDFItem(BaseModel):
     url: HttpUrl
     id: str
@@ -42,7 +44,11 @@ async def process_pdf(file_path: str,item_id:str):
         modules = splitpdf(cleaned_text)
         # 4. 生成所有prompt
         prompts = prompt_rule(modules, last_page_num, has_global_image,has_section23_image, has_tech_route_image)
-
+        # #保存prompts到temp/{item_id}.txt
+        # os.makedirs("temp",exist_ok=True)
+        # with open(f"temp/{item_id}.txt","w",encoding="utf-8") as f:
+        #     f.write("\n\n".join(prompts))
+        # exit(0)
         # 5. 并发调用API处理所有prompt
         tasks = [hunyuanAPI(prompt) for prompt in prompts]
         results = await asyncio.gather(*tasks)
@@ -339,17 +345,18 @@ def splitpdf(text):
     
     return modules
 
+
+# 全局AsyncOpenAI client
+hunyuan_client = AsyncOpenAI(
+    api_key=os.environ.get("HUNYUAN_API_KEY"),
+    base_url="https://api.hunyuan.cloud.tencent.com/v1",
+)
 async def hunyuanAPI(prompt, retry_count=3):
     """异步调用混元API，带重试机制"""
-    # 构造异步client
-    client = AsyncOpenAI(
-        api_key=os.environ.get("HUNYUAN_API_KEY"),  # 混元 APIKey
-        base_url="https://api.hunyuan.cloud.tencent.com/v1",  # 混元 endpoint
-    )
     for attempt in range(retry_count):
         try:
             async with api_semaphore:
-                completion = await client.chat.completions.create(
+                completion = await hunyuan_client.chat.completions.create(
                     model="hunyuan-2.0-thinking-20251109",
                     messages=[
                         {
@@ -479,7 +486,7 @@ def parse_review_str(review_str):
 
 def process_review_results(review_list):
     """
-    处理评审结果：合并数据、转换格式、统计总分（直接求和各分项分数）
+    处理评审结果：合并数据、转换格式、统计不符合规则序号
     Args:
         review_list: 解析后的评审结果列表（每个元素是符合格式的字典）
     Returns:
@@ -488,39 +495,29 @@ def process_review_results(review_list):
     # 1. 初始化结果容器
     final_result = {
         "审查结果": [],
-        "统计": {
-            "总分": ""  # 仅保留总分，直接求和各分项分数
-        }
+        "统计": ""  # 存储不符合规则序号，格式如"1、10、"
     }
-    # 2. 评分统计相关变量
-    total_score = 0.0  # 直接求和总分
+    # 2. 统计不符合规则序号
+    non_compliant_rules = []
     # 3. 遍历处理每个评审结果
     for review in review_list:
         # 3.1 字段映射（转换为目标格式）
         processed_item = {
             "规则内容（需带规则序号）": review.get("规则内容", ""),
-            "评估结果": review.get("评分", ""),
+            "评估结果": review.get("是否符合", ""),
             "理由": review.get("理由", "")
         }
         final_result["审查结果"].append(processed_item)
-        # 3.2 处理评分统计（提取"/"前的分数，直接求和）
-        score_str = review.get("评分", "0/3")  # 默认0/3，保证容错
-        try:
-            # 拆分得分和分项满分
-            score_part, full_part = score_str.split("/")
-            current_score = float(score_part)
-            
-            # 直接累加得分
-            total_score += current_score
-        except (ValueError, IndexError):
-            # 容错：如果评分格式异常，跳过该条统计
-            logger.warning(f"警告：评分格式异常，无法统计：{score_str}")
-            continue
+        # 3.2 统计不符合规则序号
+        if review.get("是否符合", "") == "不符合":
+            # 提取规则序号（假设规则内容以"X."开头）
+            rule_content = review.get("规则内容", "")
+            if "." in rule_content:
+                rule_number = rule_content.split(".")[0]
+                non_compliant_rules.append(rule_number)
     
-    # 4. 计算最终总分（直接求和，保留2位小数）
-    final_total_score = round(total_score, 2)
-    # 5. 填充统计结果
-    final_result["统计"]["总分"] = f"{final_total_score}"
+    # 4. 格式化统计结果为"1、10、"形式
+    final_result["统计"] = "、".join(non_compliant_rules) + "、" if non_compliant_rules else ""
     return final_result
 
 async def download_pdf(url: str, retry_count: int = 3, retry_delay: int = 3):
