@@ -1,15 +1,15 @@
 from pypdf import PdfReader
 import logging,asyncio,uvicorn,io,re,os,httpx
 from openai import AsyncOpenAI
-from pathlib import Path
 from fastapi import FastAPI,HTTPException,BackgroundTasks
 from pydantic import BaseModel,HttpUrl
 import json
 import time
 import sqlite3
-from prompt import prompt_rule
-from typing import List
+from typing import List,Optional,Dict
 import fitz
+from prompt import prompt_rule
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,36 +26,143 @@ class PDFItem(BaseModel):
     url: HttpUrl
     id: str
 
+TARGET_SENTENCE="对其他来源资金的经费来源、资金具体开支用途做简要说明。"
+MODULE_CONFIG={
+    2:{"full":"二、立项依据","core":"立项依据"},
+    3:{"full":"三、项目的研究内容、研究目标，以及拟解决的关键科学问题","core":"项目的研究内容、研究目标，以及拟解决的关键科学问题"},
+    4:{"full":"四、拟采取的研究方案及可行性分析","core":"拟采取的研究方案及可行性分析"},
+    5:{"full":"五、本项目的特色与创新之处","core":"本项目的特色与创新之处"},
+    6:{"full":"六、年度研究计划及预期研究结果","core":"年度研究计划及预期研究结果"},
+    7:{"full":"七、研究基础与⼯作条件","core":"研究基础与⼯作条件"},
+    8:{"full":"⼋、申请⼈简介","core":"申请⼈简介"}
+}
+
+
+def find_module_positions(doc:fitz.Document,max_pages:int):
+    """查找PDF中模块2-5的位置"""
+    target_modules = [2,3,4,5]
+    module_positions = {k: None for k in target_modules}
+    for page_idx in range(min(max_pages,len(doc))):
+        if all(pos is not None for pos in module_positions.values()):
+            break
+        page=doc[page_idx]
+        for module_num in target_modules:
+            if module_positions[module_num] is not None:
+                continue
+            titles=MODULE_CONFIG[module_num]
+            full_matches=page.search_for(titles["full"])
+            if full_matches:
+                module_positions[module_num]=page_idx
+                continue
+            core_matches=page.search_for(titles["core"])
+            if core_matches:
+                module_positions[module_num]=page_idx
+    return module_positions
+
+def check_images_in_sections(doc:fitz.Document,total_pages:int,module_positions:Dict[int,Optional[int]]):
+    """检查模块中的图片存在情况"""
+    has_global_image=False
+    has_section23_image=False
+    has_tech_route_image=False
+
+    for page_idx in range(total_pages):
+        page=doc[page_idx]
+        current_page_has_img=len(page.get_images(full=True))>0
+        if current_page_has_img:
+            has_global_image=True
+        if module_positions[2] is not None and module_positions[3] is not None:
+            if module_positions[2] <= page_idx <= module_positions[3] and current_page_has_img:
+                has_section23_image = True
+        if module_positions[4] is not None and module_positions[5] is not None:
+            if module_positions[4] <= page_idx <= module_positions[5] and current_page_has_img:
+                has_tech_route_image=True
+    return has_global_image,has_section23_image,has_tech_route_image
+
+
+def extract_pdf(file_bytes):
+    """从PDF中提取文本和图像信息"""
+    try:
+        stream=io.BytesIO(file_bytes)
+        reader=PdfReader(stream)
+        doc=fitz.open(stream=file_bytes,filetype="pdf")
+        total_pages=len(reader.pages)
+        full_raw_text=""
+        for page_idx in range(total_pages):
+            page_text=reader.pages[page_idx].extract_text() or ""
+            full_raw_text+=page_text + "\n"
+        module_positions=find_module_positions(doc,total_pages)
+        has_global_image,has_section23_image,has_tech_route_image=check_images_in_sections(doc,total_pages,module_positions)
+        doc.close()
+        return full_raw_text,has_global_image,has_section23_image,has_tech_route_image
+    except Exception as e:
+        raise ValueError(f"Error extract_PDF: {str(e)}")
+
+def truncate_pdf_at_sentence(pdf_bytes):
+    """
+    从内存字节流处理PDF，截取到包含目标句子的页面，返回处理后的字节流
+    :param pdf_bytes: 原始PDF的字节流（bytes类型）
+    :return: 处理后的PDF字节流（bytes），未找到目标则返回None
+    """
+    target_pagenum=-1# 初始化目标页码（默认-1表示未找到）
+    with fitz.open(stream=pdf_bytes,filetype="pdf")as doc:# 1. 从字节流打开PDF（内存操作，无本地文件）
+        for page_num,page in enumerate(doc):# 遍历所有页面，查找目标句子
+            text_position=page.search_for(TARGET_SENTENCE)# 用search_for查找（贴合PDF排版，抗换行）
+            if text_position:
+                target_pagenum=page_num
+                break# 找到第一个匹配页就停止
+        if target_pagenum != -1:# 2. 如果找到目标页，截取并生成字节流
+            new_doc=fitz.open()
+            new_doc.insert_pdf(doc,from_page=0,to_page=target_pagenum)# 复制目标页及之前的所有页面到新文档
+            processed_pdf_bytes=new_doc.write()# 核心：生成处理后的字节流（不落地文件）
+            new_doc.close()
+            return processed_pdf_bytes
+        else:
+            logger.warning(f"未在PDF中找到目标句子：{TARGET_SENTENCE}")
+            return pdf_bytes
+
+
 async def process_pdf(file_path: str,item_id:str):
     """处理PDF文件，生成评估报告"""
     start_time=time.time()
     url_str=str(file_path)
     logger.info(f"开始处理PDF: {item_id}")
     try:
-        # 1. 提取PDF文本
-        truncated_text, has_global_image,has_section23_image, has_tech_route_image = extract_pdf(await download_pdf(url_str))
+        # 1.下载PDF
+        raw_pdf_bytes=await download_pdf(url_str)
+        # 2. 截取PDF到目标句子
+        processed_pdf_bytes=truncate_pdf_at_sentence(raw_pdf_bytes)
+        # 3. 提取PDF文本
+        truncated_text, has_global_image,has_section23_image, has_tech_route_image = extract_pdf(processed_pdf_bytes)
+        #truncated_text保存至{item_id}_fulltext.txt
+        with open(f"{item_id}_fulltext.txt","w",encoding="utf-8") as f:
+            f.write(truncated_text)
         if not truncated_text:
             raise HTTPException(status_code=400, detail="PDF内容为空")
-        # 2. 清理文本
+        # 4. 清理文本
         cleaned_text, last_page_num = clean_text_pageofnum(truncated_text)
-        # 3. 分割PDF内容为模块
+        # 5. 分割PDF内容为模块
         modules = splitpdf(cleaned_text)
-        # 4. 生成所有prompt
+        # 6. 生成所有prompt
         prompts = prompt_rule(modules, last_page_num, has_global_image,has_section23_image, has_tech_route_image)
+        # 6.1 分开保存所有prompt，即每个prompt一个txt文件
+        for idx,prompt in enumerate(prompts):
+            with open(f"{item_id}_prompt_{idx}.txt","w",encoding="utf-8") as f:
+                f.write(prompt)
 
-        # 5. 并发调用API处理所有prompt
+        # 7. 并发调用API处理所有prompt
         tasks = [hunyuanAPI(prompt) for prompt in prompts]
         results = await asyncio.gather(*tasks)
-        # 6. 处理API返回结果
+
+        # 8. 处理API返回结果
         all_reviews = []
         for result in results:
             parsed = parse_review_str(result)
             if parsed:
                 all_reviews.extend(parsed)
-        # 7. 生成最终报告
+        # 9. 生成最终报告
         final_report = process_review_results(all_reviews)
         processing_time=round(time.time()-start_time,2)
-        # 8. 保存报告到数据库
+        # 10. 保存报告到数据库
         with sqlite3.connect('audit.db') as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -90,100 +197,10 @@ async def process_pdf(file_path: str,item_id:str):
             "error_message": str(e)
         }
 
-def extract_pdf(file_bytes:bytes):
-    SENTENCES="对其他来源资金的经费来源、资金具体开支用途做简要说明。"
 
-    # 模块二：完整标题 + 降级匹配的核心标题（新增）
-    MODULE2_FULL = "二、立项依据"
-    MODULE2_CORE = "立项依据"
-    # 模块三：完整标题 + 降级匹配的核心标题（新增）
-    MODULE3_FULL = "三、项目的研究内容、研究目标，以及拟解决的关键科学问题"
-    MODULE3_CORE = "项目的研究内容、研究目标，以及拟解决的关键科学问题"
 
-    # 模块四：完整标题 + 降级匹配的核心标题，模块五：完整标题 + 降级匹配的核心标题
-    MODULE4_FULL = "四、拟采取的研究方案及可行性分析"
-    MODULE4_CORE = "拟采取的研究方案及可行性分析"
-    MODULE5_FULL = "五、本项目的特色与创新之处"
-    MODULE5_CORE = "本项目的特色与创新之处"
 
-    stream=io.BytesIO(file_bytes)
-    reader=PdfReader(stream)
-    total_pages=len(reader.pages)
 
-    full_raw_text = ""
-    truncated_text = ""
-    cutoff_page_idx = None
-    module2_page_idx = None
-    module3_page_idx = None
-    module4_page_idx = None
-    module5_page_idx = None
-
-    # 编译正则：严格匹配完整标题，未匹配则匹配核心标题（两级匹配）
-    pattern_module2 = re.compile(f"{re.escape(MODULE2_FULL)}|{re.escape(MODULE2_CORE)}", flags=re.UNICODE)
-    pattern_module3 = re.compile(f"{re.escape(MODULE3_FULL)}|{re.escape(MODULE3_CORE)}", flags=re.UNICODE)
-    pattern_module4 = re.compile(f"{re.escape(MODULE4_FULL)}|{re.escape(MODULE4_CORE)}", flags=re.UNICODE)
-    pattern_module5 = re.compile(f"{re.escape(MODULE5_FULL)}|{re.escape(MODULE5_CORE)}", flags=re.UNICODE)
-    # 终止语句严格匹配正则
-    pattern_terminal = re.compile(re.escape(SENTENCES))
-
-    for page_idx in range(total_pages):
-        page_text=reader.pages[page_idx].extract_text() or ""
-        full_raw_text+=page_text + "\n"
-
-        # ========== 新增：模块二 两级匹配 ==========
-        if module2_page_idx is None and pattern_module2.search(page_text):
-            module2_page_idx = page_idx
-        # ========== 新增：模块三 两级匹配 ==========
-        if module3_page_idx is None and pattern_module3.search(page_text):
-            module3_page_idx = page_idx
-
-        # ========== 优化点：模块四两级匹配（仅首次匹配赋值） ==========
-        if module4_page_idx is None and pattern_module4.search(page_text):
-            module4_page_idx = page_idx
-        # ========== 优化点：模块五两级匹配（仅首次匹配赋值） ==========
-        if module5_page_idx is None and pattern_module5.search(page_text):
-            module5_page_idx = page_idx
-
-        terminal_match=pattern_terminal.search(full_raw_text)
-        if terminal_match:
-            truncated_text=full_raw_text[:terminal_match.end()]
-            cutoff_page_idx = page_idx
-            break
-    if cutoff_page_idx is None:
-        truncated_text = full_raw_text
-        cutoff_page_idx = total_pages - 1
-    
-    stream.seek(0)
-    doc=fitz.open(stream=stream, filetype="pdf")
-    has_global_image = False
-    has_section23_image=False
-    has_tech_route_image = False
-
-    for page_idx in range(cutoff_page_idx + 1):
-        page = doc[page_idx]
-        current_page_has_img = len(page.get_images(full=True)) > 0
-
-        if current_page_has_img:
-            has_global_image = True
-
-        # ========== 新增：判断页面是否在【模块二 ~ 模块三】区间内 ==========
-        in_section23 = False
-        if module2_page_idx is not None and module3_page_idx is not None:
-            if module2_page_idx <= page_idx <= module3_page_idx:
-                in_section23 = True
-        if in_section23 and current_page_has_img and not has_section23_image:
-            has_section23_image = True
-
-        # 判断是否在目标章节区间内
-        in_target_section = False
-        if module4_page_idx is not None and module5_page_idx is not None:
-            if module4_page_idx <= page_idx <= module5_page_idx:
-                in_target_section = True
-        if in_target_section and current_page_has_img:
-            has_tech_route_image = True
-    
-    doc.close()
-    return truncated_text, has_global_image,has_section23_image, has_tech_route_image
     
 def clean_text_pageofnum(text):
     lines = text.splitlines()
@@ -525,40 +542,33 @@ def process_review_results(review_list):
 
 async def download_pdf(url: str, retry_count: int = 3, retry_delay: int = 3):
     """下载PDF文件，带重试机制"""
-    try:
-        url_str = str(url)
-        if not url_str.startswith(("http://", "https://")):
-            raise ValueError("无效的URL协议")
+    url_str = str(url)
+    if not url_str.startswith(("http://", "https://")):
+        raise ValueError("无效的URL协议")
         
-        for attempt in range(retry_count):
-            try:
-                async with httpx.AsyncClient(timeout=60) as client:
-                    response = await client.get(url_str)
-                    response.raise_for_status()
-                    
-                    # 验证内容类型
-                    content_type = response.headers.get("content-type", "").lower()
-                    if "pdf" not in content_type:
-                        # 对于中文URL的服务端，有时会返回HTML错误页面
-                        if "text/html" in content_type:
-                            raise ValueError("URL指向的是一个HTML页面，而不是PDF文件")
-                        else:
-                            raise ValueError(f"URL指向的文件不是PDF格式 (Content-Type: {content_type})")
-                    return response.content
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                logger.warning(f"下载PDF失败 (尝试 {attempt+1}/{retry_count}): {e}")
-                if attempt < retry_count - 1:
-                    logger.info(f"等待{retry_delay}秒后重试...")
-                    await asyncio.sleep(retry_delay)
-                else:
-                    logger.error(f"下载PDF彻底失败，已达到最大重试次数 {retry_count}: {e}")
-                    return None
-            except Exception as e:
-                logger.error(f"下载PDF失败: {e}")
+    for attempt in range(retry_count):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.get(url_str)
+                response.raise_for_status()
+                
+                # 验证内容类型
+                content_type = response.headers.get("content-type", "").lower()
+                if "pdf" not in content_type:
+                    # 对于中文URL的服务端，有时会返回HTML错误页面
+                    if "text/html" in content_type:
+                        raise ValueError("URL指向的是一个HTML页面，而不是PDF文件")
+                    else:
+                        raise ValueError(f"URL指向的文件不是PDF格式 (Content-Type: {content_type})")
+                return response.content
+        except Exception as e:
+            logger.warning(f"下载PDF失败 (尝试 {attempt+1}/{retry_count}): {e}")
+            if attempt < retry_count - 1:
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error(f"下载PDF彻底失败，已达到最大重试次数 {retry_count}: {e}")
                 return None
-    except Exception as e:
-        logger.error(f"下载PDF失败: {e}")
-        return None
+    return None
 
 # 测试接口
 @app.get("/audit/health", tags=["健康检查"])
@@ -679,5 +689,5 @@ def init_db():
 if __name__ == "__main__":
     if not os.path.exists("audit.db"):
         init_db()
-    # 启动FastAPI服务
-    uvicorn.run("app:app", host="0.0.0.0", port=8000,reload=True)
+    # 启动 FastAPI 服务
+    uvicorn.run("app:app", host="127.0.0.1", port=8000,reload=True)

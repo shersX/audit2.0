@@ -11,3 +11,4 @@ wheels/
 /temp
 .trae
 audit.db
+/output/
