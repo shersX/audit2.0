@@ -11,3 +11,11 @@ wheels/
 /temp
 .trae
 audit.db
+/output
+/eval/runs/*
+!/eval/runs/.gitkeep
+/eval/worksheets/*
+!/eval/worksheets/.gitkeep
+/eval/reports/*
+!/eval/reports/.gitkeep
+/eval
