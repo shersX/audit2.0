@@ -5,6 +5,14 @@ import fitz
 from pypdf import PdfReader
 
 
+def _extract_page_text(reader: PdfReader, fitz_doc: fitz.Document, page_idx: int) -> str:
+    """优先 pypdf 抽文本；单页失败时降级 fitz。"""
+    try:
+        return reader.pages[page_idx].extract_text() or ""
+    except Exception:
+        return fitz_doc[page_idx].get_text() or ""
+
+
 def extract_pdf(file_bytes: bytes):
     SENTENCES = "对其他来源资金的经费来源、资金具体开支用途做简要说明。"
 
@@ -17,11 +25,11 @@ def extract_pdf(file_bytes: bytes):
     MODULE5_FULL = "五、本项目的特色与创新之处"
     MODULE5_CORE = "本项目的特色与创新之处"
 
-    stream = io.BytesIO(file_bytes)
-    reader = PdfReader(stream)
+    reader = PdfReader(io.BytesIO(file_bytes))
+    fitz_doc = fitz.open(stream=io.BytesIO(file_bytes), filetype="pdf")
     total_pages = len(reader.pages)
 
-    full_raw_text = ""
+    page_texts = []
     truncated_text = ""
     cutoff_page_idx = None
     module2_page_idx = None
@@ -44,8 +52,8 @@ def extract_pdf(file_bytes: bytes):
     pattern_terminal = re.compile(re.escape(SENTENCES))
 
     for page_idx in range(total_pages):
-        page_text = reader.pages[page_idx].extract_text() or ""
-        full_raw_text += page_text + "\n"
+        page_text = _extract_page_text(reader, fitz_doc, page_idx)
+        page_texts.append(page_text)
 
         if module2_page_idx is None and pattern_module2.search(page_text):
             module2_page_idx = page_idx
@@ -56,23 +64,22 @@ def extract_pdf(file_bytes: bytes):
         if module5_page_idx is None and pattern_module5.search(page_text):
             module5_page_idx = page_idx
 
-        terminal_match = pattern_terminal.search(full_raw_text)
+        terminal_match = pattern_terminal.search(page_text)
         if terminal_match:
-            truncated_text = full_raw_text[: terminal_match.end()]
+            prefix = "".join(p + "\n" for p in page_texts[:-1])
+            truncated_text = prefix + page_text[: terminal_match.end()]
             cutoff_page_idx = page_idx
             break
     if cutoff_page_idx is None:
-        truncated_text = full_raw_text
+        truncated_text = "".join(p + "\n" for p in page_texts)
         cutoff_page_idx = total_pages - 1
 
-    stream.seek(0)
-    doc = fitz.open(stream=stream, filetype="pdf")
     has_global_image = False
     has_section23_image = False
     has_tech_route_image = False
 
     for page_idx in range(cutoff_page_idx + 1):
-        page = doc[page_idx]
+        page = fitz_doc[page_idx]
         current_page_has_img = len(page.get_images(full=True)) > 0
 
         if current_page_has_img:
@@ -92,5 +99,5 @@ def extract_pdf(file_bytes: bytes):
         if in_target_section and current_page_has_img:
             has_tech_route_image = True
 
-    doc.close()
+    fitz_doc.close()
     return truncated_text, has_global_image, has_section23_image, has_tech_route_image

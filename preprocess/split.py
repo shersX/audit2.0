@@ -4,6 +4,35 @@ import re
 logger = logging.getLogger("PDF-Audit-API")
 
 
+def _is_cross_reference(text, start, end):
+    line_start = text.rfind("\n", 0, start) + 1
+    prefix = text[line_start:start]
+    if re.search(r'详见[""「]?$|见[""「]?$', prefix):
+        return True
+    suffix = text[end : end + 5]
+    return suffix.lstrip().startswith("部分")
+
+
+def _find_section_heading(full_title, keyword, text, start_pos=0):
+    patterns = [
+        rf"(?m)^\s*{re.escape(full_title)}\b",
+        rf"^\s*(?:[一二三四五六七八九十]+|\d+)\s*[、.）]\s*{re.escape(keyword)}",
+    ]
+    if full_title == "项目预算表":
+        patterns.append(re.escape(full_title))
+
+    candidates = []
+    for pat in patterns:
+        for m in re.finditer(pat, text, re.MULTILINE):
+            if m.start() < start_pos:
+                continue
+            if _is_cross_reference(text, m.start(), m.end()):
+                continue
+            candidates.append(m)
+
+    return min(candidates, key=lambda m: m.start()) if candidates else None
+
+
 def splitpdf(text):
     text = "".join(c for c in text if c.isprintable() or c in "\n\r\t")
     pattern = r"课题名称"
@@ -14,10 +43,7 @@ def splitpdf(text):
 
     title_info = [
         ("二、立项依据", "立项依据"),
-        (
-            "三、项目的研究内容、研究目标，以及拟解决的关键科学问题",
-            "项目的研究内容、研究目标，以及拟解决的关键科学问题",
-        ),
+        ("三、项目的研究内容、研究目标，以及拟解决的关键科学问题","项目的研究内容、研究目标，以及拟解决的关键科学问题",),
         ("四、拟采取的研究方案及可行性分析", "拟采取的研究方案及可行性分析"),
         ("五、本项目的特色与创新之处", "本项目的特色与创新之处"),
         ("六、年度研究计划及预期研究结果", "年度研究计划及预期研究结果"),
@@ -28,30 +54,13 @@ def splitpdf(text):
     titles = [item[0] for item in title_info]
     keywords = [item[1] for item in title_info]
 
-    matches = [re.search(re.escape(t), text) for t in titles]
-
-    for i, (match, keyword) in enumerate(zip(matches, keywords)):
-        if not match:
-            flexible_pattern = (
-                rf"^\s*(?:[一二三四五六七八九十]+|\d+)\s*[、.）]\s*{re.escape(keyword)}"
-            )
-            flexible_match = re.search(flexible_pattern, text, re.MULTILINE)
-            if flexible_match:
-                matches[i] = flexible_match
-                logger.info(f"使用灵活匹配成功匹配标题：{titles[i]}")
-
-    valid_matches = [(i, match) for i, match in enumerate(matches) if match]
-    if valid_matches:
-        valid_matches.sort(key=lambda x: x[1].start())
-        fixed_matches = matches.copy()
-        last_pos = -1
-        for idx, match in valid_matches:
-            current_start = match.start()
-            if current_start < last_pos:
-                fixed_matches[idx] = None
-            else:
-                last_pos = current_start
-        matches = fixed_matches
+    matches = []
+    search_start = 0
+    for title, keyword in zip(titles, keywords):
+        match = _find_section_heading(title, keyword, text, search_start)
+        matches.append(match)
+        if match:
+            search_start = match.end()
 
     modules = {}
     if second_ktmc_start is not None:

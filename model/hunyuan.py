@@ -23,7 +23,7 @@ async def hunyuanAPI(prompt, retry_count=3):
         try:
             async with api_semaphore:
                 completion = await hunyuan_client.chat.completions.create(
-                    model="deepseek-v4-pro",
+                    model="kimi-k2.6",
                     messages=[{"role": "user", "content": prompt}],
                     response_format=REVIEW_RESPONSE_FORMAT,
                 )

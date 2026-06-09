@@ -4,11 +4,16 @@ from pydantic import BaseModel,HttpUrl
 import json
 import time
 import sqlite3
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 from prompt import prompt_rule
 from model.hunyuan import hunyuanAPI
 from preprocess import extract_pdf, clean_text_pageofnum, splitpdf
 from postprocess import parse_review_str, process_review_results
 from typing import List
+
+EXPECTED_RULE_COUNT = 49
+RUNS_DIR = Path("runs")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,16 +27,59 @@ class PDFItem(BaseModel):
     url: HttpUrl
     id: str
 
+
+def _pdf_filename_from_url(url: str) -> str:
+    name = unquote(urlparse(str(url)).path.split("/")[-1])
+    return name or str(url)
+
+
+def _build_error_entry(item_id: str, pdf_url: str, error: str, parsed_rows: int | None = None) -> dict:
+    entry = {
+        "sample_id": item_id,
+        "pdf": _pdf_filename_from_url(pdf_url),
+        "error": error,
+    }
+    if parsed_rows is not None:
+        entry["parsed_rows"] = parsed_rows
+    return entry
+
+
+def _save_errors_json(run_id: str, errors: list[dict]) -> None:
+    if not errors:
+        return
+    run_dir = RUNS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    err_path = run_dir / "errors.json"
+    with err_path.open("w", encoding="utf-8") as f:
+        json.dump(errors, f, ensure_ascii=False, indent=2)
+    logger.info(f"失败记录已写入: {err_path} ({len(errors)} 条)")
+
+
+def _update_item_error(item_id: str, error_message: str, processing_time: float = 0) -> None:
+    with sqlite3.connect("audit.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE audit_items
+            SET status = 'error', result = NULL, error_message = ?, processing_time = ?
+            WHERE item_id = ?
+            """,
+            (error_message, processing_time, item_id),
+        )
+        conn.commit()
+
+
 async def audit_pdf_bytes(pdf_bytes: bytes, item_id: str, pdf_source: str = "") -> dict:
     """从 PDF 字节流执行完整审核管线，不写数据库。"""
     start_time = time.time()
     logger.info(f"开始处理PDF: {item_id}")
     try:
-        truncated_text, has_global_image, has_section23_image, has_tech_route_image = extract_pdf(pdf_bytes)
+        truncated_text, has_global_image, has_section23_image, has_tech_route_image = \
+            await asyncio.to_thread(extract_pdf, pdf_bytes)
         if not truncated_text:
             raise ValueError("PDF内容为空")
-        cleaned_text, last_page_num = clean_text_pageofnum(truncated_text)
-        modules = splitpdf(cleaned_text)
+        cleaned_text, last_page_num = await asyncio.to_thread(clean_text_pageofnum, truncated_text)
+        modules = await asyncio.to_thread(splitpdf, cleaned_text)
         prompts = prompt_rule(
             modules, last_page_num, has_global_image, has_section23_image, has_tech_route_image
         )
@@ -64,9 +112,9 @@ async def audit_pdf_bytes(pdf_bytes: bytes, item_id: str, pdf_source: str = "") 
         }
 
 
-async def process_pdf(file_path: str, item_id: str):
-    """处理PDF文件，生成评估报告并写入数据库。"""
-    url_str = str(file_path)
+async def process_pdf(pdf_url: str, item_id: str):
+    """下载 PDF 并执行审核，生成评估报告并写入数据库。"""
+    url_str = str(pdf_url)
     pdf_bytes = await download_pdf(url_str)
     if not pdf_bytes:
         result = {
@@ -76,23 +124,27 @@ async def process_pdf(file_path: str, item_id: str):
             "processing_time": 0,
             "error_message": "PDF下载失败",
         }
-        with sqlite3.connect("audit.db") as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE audit_items
-                SET status = 'error', result = NULL, error_message = ?, processing_time = ?
-                WHERE item_id = ?
-                """,
-                (result["error_message"], 0, item_id),
-            )
-            conn.commit()
+        _update_item_error(item_id, result["error_message"], 0)
         return result
 
     audit_result = await audit_pdf_bytes(pdf_bytes, item_id, url_str)
     processing_time = audit_result.get("processing_time", 0)
 
     if audit_result["status"] == "success":
+        rule_count = audit_result.get("rule_count", 0)
+        if rule_count != EXPECTED_RULE_COUNT:
+            error_message = f"规则条数异常: 期望 {EXPECTED_RULE_COUNT}, 实际 {rule_count}"
+            _update_item_error(item_id, error_message, processing_time)
+            return {
+                "item_id": item_id,
+                "pdf_url": url_str,
+                "status": "error",
+                "processing_time": processing_time,
+                "error_message": error_message,
+                "rule_count": rule_count,
+                "parsed_rows": rule_count,
+            }
+
         with sqlite3.connect("audit.db") as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -116,23 +168,14 @@ async def process_pdf(file_path: str, item_id: str):
             "result": audit_result["result"],
         }
 
-    with sqlite3.connect("audit.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE audit_items
-            SET status = 'error', result = NULL, error_message = ?, processing_time = ?
-            WHERE item_id = ?
-            """,
-            (audit_result.get("error_message", "未知错误"), processing_time, item_id),
-        )
-        conn.commit()
+    error_message = audit_result.get("error_message", "未知错误")
+    _update_item_error(item_id, error_message, processing_time)
     return {
         "item_id": item_id,
         "pdf_url": url_str,
         "status": "error",
         "processing_time": processing_time,
-        "error_message": audit_result.get("error_message", "未知错误"),
+        "error_message": error_message,
     }
 
 
@@ -196,9 +239,16 @@ async def audit(audit_request: List[PDFItem], background_tasks: BackgroundTasks)
                 VALUES (?,?,?,?)
             """, (item.id, str(item.url),"processing",current_time))
 
-    # 使用异步队列处理任务，设置并发数为5
-    background_tasks.add_task(process_all_items, audit_request, total_items, 5)
-    return {"status":"success", "message": f"审查任务已创建，共 {total_items} 个任务，可以通过GET /audit/{{item_id}}查询状态"}
+    run_id = time.strftime("%Y%m%d_%H%M%S")
+    background_tasks.add_task(process_all_items, audit_request, total_items, 5, run_id)
+    return {
+        "status": "success",
+        "run_id": run_id,
+        "message": (
+            f"审查任务已创建，共 {total_items} 个任务，run_id={run_id}，"
+            f"失败记录见 runs/{run_id}/errors.json，可通过 GET /audit/{{item_id}} 查询状态"
+        ),
+    }
 
 @app.get("/audit/all_items", tags=["查询所有任务"])
 def get_all_items():
@@ -238,38 +288,65 @@ def get_item_result(item_id: str):
         "create_time": create_time
     }
 
-async def process_all_items(items: List[PDFItem], total_items: int, max_workers: int = 5):
+async def process_all_items(
+    items: List[PDFItem], total_items: int, max_workers: int = 5, run_id: str = ""
+):
     """使用异步队列控制并发处理"""
     completed_count = 0
     count_lock = asyncio.Lock()
+    errors: list[dict] = []
+    errors_lock = asyncio.Lock()
     queue = asyncio.Queue()
-    
-    # 将所有任务放入队列
+
     for item in items:
         await queue.put(item)
-    
+
+    async def record_failure(item: PDFItem, error: str, parsed_rows: int | None = None) -> None:
+        async with errors_lock:
+            errors.append(_build_error_entry(item.id, str(item.url), error, parsed_rows))
+
     async def worker():
         """工作进程函数"""
         nonlocal completed_count
-        while not queue.empty():
-            item = await queue.get()
+        while True:
             try:
-                await process_pdf(item.url, item.id)
-                async with count_lock:
-                    completed_count += 1
-                logger.info(f"任务 {completed_count}/{total_items} 处理完成: {item.id}")
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            try:
+                result = await process_pdf(item.url, item.id)
+                if result.get("status") != "success":
+                    await record_failure(
+                        item,
+                        result.get("error_message", "未知错误"),
+                        result.get("parsed_rows"),
+                    )
+                    async with count_lock:
+                        completed_count += 1
+                    logger.error(
+                        f"任务 {completed_count}/{total_items} 处理失败: {item.id} - "
+                        f"{result.get('error_message')}"
+                    )
+                else:
+                    async with count_lock:
+                        completed_count += 1
+                    logger.info(f"任务 {completed_count}/{total_items} 处理完成: {item.id}")
             except Exception as e:
+                error_message = str(e)
+                _update_item_error(item.id, error_message)
+                await record_failure(item, error_message)
                 async with count_lock:
                     completed_count += 1
                 logger.error(f"任务 {completed_count}/{total_items} 处理失败: {item.id} - {e}")
             finally:
                 queue.task_done()
-    
-    # 创建指定数量的工作进程
+
     workers = [asyncio.create_task(worker()) for _ in range(max_workers)]
-    await queue.join()  # 等待所有任务完成
-    for worker in workers:
-        worker.cancel()  # 取消工作进程
+    await queue.join()
+    await asyncio.gather(*workers)
+    if run_id:
+        _save_errors_json(run_id, errors)
 
 def init_db():
     conn = sqlite3.connect("audit.db")
