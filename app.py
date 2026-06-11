@@ -55,6 +55,16 @@ def _save_errors_json(run_id: str, errors: list[dict]) -> None:
     logger.info(f"失败记录已写入: {err_path} ({len(errors)} 条)")
 
 
+def _update_item_status(item_id: str, status: str) -> None:
+    with sqlite3.connect("audit.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE audit_items SET status = ? WHERE item_id = ?",
+            (status, item_id),
+        )
+        conn.commit()
+
+
 def _update_item_error(item_id: str, error_message: str, processing_time: float = 0) -> None:
     with sqlite3.connect("audit.db") as conn:
         cursor = conn.cursor()
@@ -69,8 +79,11 @@ def _update_item_error(item_id: str, error_message: str, processing_time: float 
         conn.commit()
 
 
-async def audit_pdf_bytes(pdf_bytes: bytes, item_id: str, pdf_source: str = "") -> dict:
-    """从 PDF 字节流执行完整审核管线，不写数据库。"""
+async def audit_pdf_bytes(pdf_bytes: bytes, item_id: str, pdf_source: str = "", priority: int = 0) -> dict:
+    """从 PDF 字节流执行完整审核管线，不写数据库。
+
+    priority: 该 PDF 在 API 阶段的优先级（数值越小越优先，按提交顺序）。
+    """
     start_time = time.time()
     logger.info(f"开始处理PDF: {item_id}")
     try:
@@ -83,7 +96,7 @@ async def audit_pdf_bytes(pdf_bytes: bytes, item_id: str, pdf_source: str = "") 
         prompts = prompt_rule(
             modules, last_page_num, has_global_image, has_section23_image, has_tech_route_image
         )
-        tasks = [hunyuanAPI(prompt) for prompt in prompts]
+        tasks = [hunyuanAPI(prompt, priority=priority) for prompt in prompts]
         results = await asyncio.gather(*tasks)
         all_reviews = []
         for result in results:
@@ -112,8 +125,11 @@ async def audit_pdf_bytes(pdf_bytes: bytes, item_id: str, pdf_source: str = "") 
         }
 
 
-async def process_pdf(pdf_url: str, item_id: str):
-    """下载 PDF 并执行审核，生成评估报告并写入数据库。"""
+async def process_pdf(pdf_url: str, item_id: str, priority: int = 0):
+    """下载 PDF 并执行审核，生成评估报告并写入数据库。
+
+    priority: 该 PDF 在 API 阶段的优先级（数值越小越优先，按提交顺序）。
+    """
     url_str = str(pdf_url)
     pdf_bytes = await download_pdf(url_str)
     if not pdf_bytes:
@@ -127,7 +143,7 @@ async def process_pdf(pdf_url: str, item_id: str):
         _update_item_error(item_id, result["error_message"], 0)
         return result
 
-    audit_result = await audit_pdf_bytes(pdf_bytes, item_id, url_str)
+    audit_result = await audit_pdf_bytes(pdf_bytes, item_id, url_str, priority=priority)
     processing_time = audit_result.get("processing_time", 0)
 
     if audit_result["status"] == "success":
@@ -228,7 +244,7 @@ async def audit(audit_request: List[PDFItem], background_tasks: BackgroundTasks)
         raise HTTPException(status_code=400, detail="请求体不能为空")
     total_items=len(audit_request)
 
-    #1、先将所有任务插入数据库，状态设为“processing”
+    # 先将所有任务插入数据库，状态设为 waiting（Worker 取走后再变为 processing）
     current_time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     with sqlite3.connect("audit.db") as conn:
         cursor=conn.cursor()
@@ -237,7 +253,7 @@ async def audit(audit_request: List[PDFItem], background_tasks: BackgroundTasks)
                 INSERT OR REPLACE INTO audit_items
                 (item_id,pdf_url,status,create_time)
                 VALUES (?,?,?,?)
-            """, (item.id, str(item.url),"processing",current_time))
+            """, (item.id, str(item.url),"waiting",current_time))
 
     run_id = time.strftime("%Y%m%d_%H%M%S")
     background_tasks.add_task(process_all_items, audit_request, total_items, 5, run_id)
@@ -298,8 +314,9 @@ async def process_all_items(
     errors_lock = asyncio.Lock()
     queue = asyncio.Queue()
 
-    for item in items:
-        await queue.put(item)
+    # 按提交顺序分配优先级（priority=提交索引，数值越小越优先）
+    for priority, item in enumerate(items):
+        await queue.put((priority, item))
 
     async def record_failure(item: PDFItem, error: str, parsed_rows: int | None = None) -> None:
         async with errors_lock:
@@ -310,12 +327,13 @@ async def process_all_items(
         nonlocal completed_count
         while True:
             try:
-                item = queue.get_nowait()
+                priority, item = queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
 
             try:
-                result = await process_pdf(item.url, item.id)
+                _update_item_status(item.id, "processing")
+                result = await process_pdf(item.url, item.id, priority=priority)
                 if result.get("status") != "success":
                     await record_failure(
                         item,

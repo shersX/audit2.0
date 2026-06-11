@@ -17,11 +17,14 @@ hunyuan_client = AsyncOpenAI(
 )
 
 
-async def hunyuanAPI(prompt, retry_count=3):
-    """异步调用混元 API，带重试机制。"""
+async def hunyuanAPI(prompt, priority=0, retry_count=3):
+    """异步调用混元 API，带重试机制。
+
+    priority: 优先级（数值越小越优先，按 PDF 提交顺序传入）。
+    """
     for attempt in range(retry_count):
         try:
-            async with api_semaphore:
+            async with api_semaphore.context(priority):
                 completion = await hunyuan_client.chat.completions.create(
                     model="kimi-k2.6",
                     messages=[{"role": "user", "content": prompt}],
