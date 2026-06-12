@@ -12,7 +12,7 @@ from model.schemas import REVIEW_RESPONSE_FORMAT
 logger = logging.getLogger("PDF-Audit-API")
 
 hunyuan_client = AsyncOpenAI(
-    api_key=os.environ.get("HUNYUAN_API_KEY"),
+    api_key=os.environ.get("chenlei-yanfa200"),
     base_url="https://tokenhub.tencentmaas.com/v1",
 )
 

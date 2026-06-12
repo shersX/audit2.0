@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from prompt import prompt_rule
-from model.hunyuan import hunyuanAPI
+from model import get_llm_api
 from preprocess import extract_pdf, clean_text_pageofnum, splitpdf
 from postprocess import parse_review_str, process_review_results
 from typing import List
@@ -96,7 +96,8 @@ async def audit_pdf_bytes(pdf_bytes: bytes, item_id: str, pdf_source: str = "", 
         prompts = prompt_rule(
             modules, last_page_num, has_global_image, has_section23_image, has_tech_route_image
         )
-        tasks = [hunyuanAPI(prompt, priority=priority) for prompt in prompts]
+        llm_api = get_llm_api()
+        tasks = [llm_api(prompt, priority=priority) for prompt in prompts]
         results = await asyncio.gather(*tasks)
         all_reviews = []
         for result in results:
