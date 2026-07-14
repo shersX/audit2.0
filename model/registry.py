@@ -4,12 +4,14 @@ from collections.abc import Awaitable, Callable
 
 from model.doubao import doubaoAPI
 from model.hunyuan import hunyuanAPI
+from model.ali import aliAPI
 
 LLMCallable = Callable[..., Awaitable[str]]
 
 PROVIDERS: dict[str, LLMCallable] = {
     "hunyuan": hunyuanAPI,
     "doubao": doubaoAPI,
+    "ali": aliAPI,
 }
 
 DEFAULT_PROVIDER = "hunyuan"

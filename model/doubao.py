@@ -6,12 +6,11 @@ import os
 from openai import AsyncOpenAI
 
 from model.common import api_semaphore
-from model.schemas import REVIEW_RESPONSE_FORMAT
 
 logger = logging.getLogger("PDF-Audit-API")
 
 DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-DOUBAO_MODEL = os.environ.get("DOUBAO_MODEL", "doubao-seed-2-0-pro-260215")
+DOUBAO_MODEL = "doubao-seed-2-1-pro-260628"
 
 doubao_client = AsyncOpenAI(
     base_url=DOUBAO_BASE_URL,
@@ -29,8 +28,7 @@ async def doubaoAPI(prompt, priority=0, retry_count=3):
             async with api_semaphore.context(priority):
                 completion = await doubao_client.chat.completions.create(
                     model=DOUBAO_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    #response_format=REVIEW_RESPONSE_FORMAT,
+                    messages=[{"role": "user", "content": prompt}]
                 )
                 return completion.choices[0].message.content
         except Exception as e:

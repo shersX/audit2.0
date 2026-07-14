@@ -1,5 +1,4 @@
-#deepseek-v4-pro 	TPM:1000000 / QPM:60
-#	hy3-preview 	TPM:1000000 / QPM:60
+#RPM 500 TPM 2000000
 import asyncio
 import logging
 import os
@@ -7,28 +6,27 @@ import os
 from openai import AsyncOpenAI
 
 from model.common import api_semaphore
-from model.schemas import REVIEW_RESPONSE_FORMAT
+from model.usage import record_token_usage
 
 logger = logging.getLogger("PDF-Audit-API")
 
-hunyuan_client = AsyncOpenAI(
-    api_key=os.environ.get("chenlei-yanfa200"),
-    base_url="https://tokenhub.tencentmaas.com/v1",
+ali_client = AsyncOpenAI(
+    api_key=os.environ.get("DASHSCOPE_API_KEY"),
+    base_url="https://llm-g1mu7oh8mmt15g0y.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
 )
 
-
-async def hunyuanAPI(prompt, priority=0, retry_count=3):
-    """异步调用混元 API，带重试机制。
-
-    priority: 优先级（数值越小越优先，按 PDF 提交顺序传入）。
-    """
+async def aliAPI(prompt, priority=0, retry_count=3):
     for attempt in range(retry_count):
         try:
             async with api_semaphore.context(priority):
-                completion = await hunyuan_client.chat.completions.create(
+                completion = await ali_client.chat.completions.create(
                     model="glm-5.2",
-                    messages=[{"role": "user", "content": prompt}]
+                    messages=[{"role": "user", "content": prompt}],
                 )
+                if completion.usage:
+                    await record_token_usage(
+                        completion.usage, provider="ali", model="glm-5.2"
+                    )
                 return completion.choices[0].message.content
         except Exception as e:
             logger.error(f"API调用失败 (尝试 {attempt+1}/{retry_count}): {e}")
@@ -39,3 +37,7 @@ async def hunyuanAPI(prompt, priority=0, retry_count=3):
                 logger.critical(f"API调用彻底失败，已达到最大重试次数 {retry_count}")
                 return ""
     return ""
+
+
+if __name__ == "__main__":
+    print(asyncio.run(aliAPI("你好，请介绍一下你自己")))
