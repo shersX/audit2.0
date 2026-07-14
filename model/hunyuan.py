@@ -11,10 +11,17 @@ from model.schemas import REVIEW_RESPONSE_FORMAT
 
 logger = logging.getLogger("PDF-Audit-API")
 
-hunyuan_client = AsyncOpenAI(
-    api_key=os.environ.get("chenlei-yanfa200"),
-    base_url="https://tokenhub.tencentmaas.com/v1",
-)
+_hunyuan_client = None
+
+
+def get_hunyuan_client() -> AsyncOpenAI:
+    global _hunyuan_client
+    if _hunyuan_client is None:
+        _hunyuan_client = AsyncOpenAI(
+            api_key=os.environ.get("chenlei-yanfa200"),
+            base_url="https://tokenhub.tencentmaas.com/v1",
+        )
+    return _hunyuan_client
 
 
 async def hunyuanAPI(prompt, priority=0, retry_count=3):
@@ -22,10 +29,11 @@ async def hunyuanAPI(prompt, priority=0, retry_count=3):
 
     priority: 优先级（数值越小越优先，按 PDF 提交顺序传入）。
     """
+    client = get_hunyuan_client()
     for attempt in range(retry_count):
         try:
             async with api_semaphore.context(priority):
-                completion = await hunyuan_client.chat.completions.create(
+                completion = await client.chat.completions.create(
                     model="glm-5.2",
                     messages=[{"role": "user", "content": prompt}]
                 )

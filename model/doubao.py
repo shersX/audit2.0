@@ -12,10 +12,17 @@ logger = logging.getLogger("PDF-Audit-API")
 DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DOUBAO_MODEL = "doubao-seed-2-1-pro-260628"
 
-doubao_client = AsyncOpenAI(
-    base_url=DOUBAO_BASE_URL,
-    api_key=os.environ.get("DOUBAO_API_KEY"),
-)
+_doubao_client = None
+
+
+def get_doubao_client() -> AsyncOpenAI:
+    global _doubao_client
+    if _doubao_client is None:
+        _doubao_client = AsyncOpenAI(
+            base_url=DOUBAO_BASE_URL,
+            api_key=os.environ.get("DOUBAO_API_KEY"),
+        )
+    return _doubao_client
 
 
 async def doubaoAPI(prompt, priority=0, retry_count=3):
@@ -23,10 +30,11 @@ async def doubaoAPI(prompt, priority=0, retry_count=3):
 
     priority: 优先级（数值越小越优先，按 PDF 提交顺序传入）。
     """
+    client = get_doubao_client()
     for attempt in range(retry_count):
         try:
             async with api_semaphore.context(priority):
-                completion = await doubao_client.chat.completions.create(
+                completion = await client.chat.completions.create(
                     model=DOUBAO_MODEL,
                     messages=[{"role": "user", "content": prompt}]
                 )

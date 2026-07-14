@@ -10,16 +10,25 @@ from model.usage import record_token_usage
 
 logger = logging.getLogger("PDF-Audit-API")
 
-ali_client = AsyncOpenAI(
-    api_key=os.environ.get("DASHSCOPE_API_KEY"),
-    base_url="https://llm-g1mu7oh8mmt15g0y.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-)
+_ali_client = None
+
+
+def get_ali_client() -> AsyncOpenAI:
+    global _ali_client
+    if _ali_client is None:
+        _ali_client = AsyncOpenAI(
+            api_key=os.environ.get("DASHSCOPE_API_KEY"),
+            base_url="https://llm-g1mu7oh8mmt15g0y.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        )
+    return _ali_client
+
 
 async def aliAPI(prompt, priority=0, retry_count=3):
+    client = get_ali_client()
     for attempt in range(retry_count):
         try:
             async with api_semaphore.context(priority):
-                completion = await ali_client.chat.completions.create(
+                completion = await client.chat.completions.create(
                     model="glm-5.2",
                     messages=[{"role": "user", "content": prompt}],
                 )
