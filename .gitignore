@@ -11,6 +11,7 @@ wheels/
 /temp
 .trae
 audit.db
+<<<<<<< HEAD
 /output
 /eval/runs/*
 !/eval/runs/.gitkeep
@@ -19,3 +20,6 @@ audit.db
 /eval/reports/*
 !/eval/reports/.gitkeep
 /eval
+=======
+/output/
+>>>>>>> master
