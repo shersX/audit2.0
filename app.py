@@ -4,10 +4,11 @@ from pydantic import BaseModel,HttpUrl
 import json
 import time
 import sqlite3
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from prompt import prompt_rule
-from model import get_llm_api
+from model import get_llm_api, resolve_provider
 from preprocess import extract_pdf, clean_text_pageofnum, splitpdf
 from postprocess import parse_review_str, process_review_results
 from typing import List
@@ -21,7 +22,12 @@ logging.basicConfig(
 )
 logger=logging.getLogger("PDF-Audit-API")
 
-app=FastAPI(title="PDF-Audit-API",summary="PDF审核API",version="2.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info(f"当前默认使用模型 provider: {resolve_provider()}")
+    yield
+
+app=FastAPI(title="PDF-Audit-API",summary="PDF审核API",version="2.0.0",lifespan=lifespan)
 
 class PDFItem(BaseModel):
     url: HttpUrl
@@ -315,6 +321,13 @@ async def process_all_items(
     async def record_failure(item: PDFItem, error: str, parsed_rows: int | None = None) -> None:
         async with errors_lock:
             errors.append(_build_error_entry(item.id, str(item.url), error, parsed_rows))
+            # 流式写盘：每条失败立即落盘，防止进程中途崩溃丢失记录
+            # 写盘失败只记日志，不打断任务流程，也不影响后续 completed_count 统计
+            if run_id:
+                try:
+                    _save_errors_json(run_id, errors)
+                except Exception as save_err:
+                    logger.warning(f"流式写盘 errors.json 失败: {save_err}")
 
     async def worker():
         """工作进程函数"""
