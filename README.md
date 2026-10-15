@@ -44,10 +44,9 @@
 
 ```bash
 uv sync
-uv pip install pymupdf httpx
 ```
 
-> `pyproject.toml` 当前声明了 fastapi / openai / pypdf / uvicorn 等；运行时还需 **pymupdf**（图像检测）与 **httpx**（下载 PDF，通常随 openai 间接安装，建议显式安装）。
+> 依赖已包含 fastapi / openai / pypdf / pymupdf / httpx / uvicorn 等。
 
 ### 2. 配置环境变量
 
@@ -81,7 +80,23 @@ python app.py
 uv run python app.py
 ```
 
-默认监听 `http://0.0.0.0:8000`；若本地尚无 `audit.db`，启动时会自动建库。交互式文档：`http://127.0.0.1:8000/docs`。
+默认监听 `http://0.0.0.0:8000`；启动时 lifespan 会确保 `audit.db` 建表。交互式文档：`http://127.0.0.1:8000/docs`。
+
+### 4. 本地联调（不启 HTTP / 不下载 / 不写 DB）
+
+```bash
+# 只跑前处理 + 生成 prompts（不调 LLM）
+python -m cli --pdf path/to/file.pdf --dry-prompt
+
+# 落盘第 1 个模块的 prompt 文本
+python -m cli --pdf path/to/file.pdf --dry-prompt --module 1
+
+# 完整审核管线，结果打印到 stdout（需配置 AUDIT_LLM_PROVIDER 与对应 API Key）
+python -m cli --pdf path/to/file.pdf --item-id local_001 --out out.json
+
+# 跳过「必须恰好 49 条」校验，便于排查解析问题
+python -m cli --pdf path/to/file.pdf --no-rule-count-check
+```
 
 ---
 
@@ -236,21 +251,23 @@ POST /audit（接收 PDF URL 列表）
 
 ```
 audit2.0/
-├── app.py                 # FastAPI 路由、任务队列、审核编排、SQLite
+├── app.py                 # FastAPI 装配入口（lifespan + 挂载路由）
+├── cli.py                 # 本地联调：本地 PDF → 管线（可 --dry-prompt）
+├── config.py              # 常量（规则数、DB、workers、下载重试等）
+├── api/                   # HTTP 路由与请求模型
+│   ├── schemas.py
+│   └── routes.py
+├── pipeline/              # 纯审核管线（不写 DB）
+│   └── audit.py
+├── services/              # 下载、SQLite、错误落盘、批量 Worker
+│   ├── download.py
+│   ├── store.py
+│   ├── errors.py
+│   └── batch.py
 ├── prompt.py              # 49 条规则 / 6 模块 Prompt
 ├── preprocess/            # PDF 提取、清洗、分章
-│   ├── extract.py
-│   ├── clean.py
-│   └── split.py
 ├── model/                 # LLM Provider 与并发控制
-│   ├── registry.py        # Provider 注册与 AUDIT_LLM_PROVIDER 解析
-│   ├── common.py          # PrioritySemaphore（默认 6 槽）
-│   ├── schemas.py         # 审核结果 JSON Schema
-│   ├── usage.py           # Token 累计（评测用）
-│   ├── hunyuan.py / doubao.py / ali.py / ...
 ├── postprocess/           # 解析与结果格式化
-│   ├── parse.py
-│   └── format.py
 ├── eval/                  # 金标准评测（见 eval/README.md）
 ├── runs/                  # 线上批次失败记录 runs/{run_id}/errors.json
 ├── pyproject.toml
