@@ -82,6 +82,8 @@ uv run python app.py
 
 默认监听 `http://0.0.0.0:8000`；启动时 lifespan 会确保 `audit.db` 建表。交互式文档：`http://127.0.0.1:8000/docs`。
 
+**结果展示页**：浏览器打开 `http://127.0.0.1:8000/`，可查看任务列表与 49 条规则明细（只读）。
+
 ### 4. 本地联调（不启 HTTP / 不下载 / 不写 DB）
 
 ```bash
@@ -106,9 +108,11 @@ python -m cli --pdf path/to/file.pdf --no-rule-count-check
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
+| `GET` | `/` | 审核结果展示页（静态前端） |
 | `GET` | `/audit/health` | 健康检查 |
 | `POST` | `/audit` | 批量提交审核任务（异步后台处理） |
-| `GET` | `/audit/all_items` | 查询所有任务记录 |
+| `GET` | `/audit/items` | 结构化任务列表（前端用） |
+| `GET` | `/audit/all_items` | 查询所有任务记录（原始行） |
 | `GET` | `/audit/{item_id}` | 查询单个任务结果 |
 
 ---
@@ -251,9 +255,10 @@ POST /audit（接收 PDF URL 列表）
 
 ```
 audit2.0/
-├── app.py                 # FastAPI 装配入口（lifespan + 挂载路由）
+├── app.py                 # FastAPI 装配入口（lifespan + 挂载路由 / 静态页）
 ├── cli.py                 # 本地联调：本地 PDF → 管线（可 --dry-prompt）
 ├── config.py              # 常量（规则数、DB、workers、下载重试等）
+├── static/                # 审核结果展示前端（HTML/CSS/JS）
 ├── api/                   # HTTP 路由与请求模型
 │   ├── schemas.py
 │   └── routes.py
@@ -264,7 +269,7 @@ audit2.0/
 │   ├── store.py
 │   ├── errors.py
 │   └── batch.py
-├── prompt.py              # 49 条规则 / 6 模块 Prompt
+├── prompt/                # 49 条规则 / 6 模块 Prompt（assemble + module1–6）
 ├── preprocess/            # PDF 提取、清洗、分章
 ├── model/                 # LLM Provider 与并发控制
 ├── postprocess/           # 解析与结果格式化

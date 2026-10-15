@@ -10,7 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from api.schemas import PDFItem
 from config import API_VERSION, DEFAULT_MAX_WORKERS
 from services.batch import process_all_items
-from services.store import get_item, insert_waiting_batch, list_items_raw
+from services.store import get_item, insert_waiting_batch, list_items, list_items_raw
 
 router = APIRouter()
 
@@ -46,6 +46,12 @@ async def audit(audit_request: List[PDFItem], background_tasks: BackgroundTasks)
             f"失败记录见 runs/{run_id}/errors.json，可通过 GET /audit/{{item_id}} 查询状态"
         ),
     }
+
+
+@router.get("/audit/items", tags=["查询任务列表"])
+def get_items():
+    """结构化任务列表（前端用，不含完整 result）。"""
+    return list_items()
 
 
 @router.get("/audit/all_items", tags=["查询所有任务"])

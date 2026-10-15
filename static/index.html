@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF 审核结果</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;600&family=Source+Sans+3:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <h1>PDF 审核结果</h1>
+        <p>国自然申报书符合性审查 · 只读查看</p>
+      </div>
+      <div class="topbar-actions">
+        <button type="button" id="btnRefresh" class="btn">刷新</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="pane list-pane">
+        <div class="pane-head">
+          <h2>任务列表</h2>
+          <select id="statusFilter" aria-label="按状态筛选">
+            <option value="all">全部状态</option>
+            <option value="success">success</option>
+            <option value="error">error</option>
+            <option value="processing">processing</option>
+            <option value="waiting">waiting</option>
+          </select>
+        </div>
+        <div id="itemList" class="item-list" role="list"></div>
+        <p id="listEmpty" class="empty" hidden>暂无任务记录</p>
+        <div class="pager" id="pager">
+          <button type="button" id="btnPrev" class="btn btn-sm" disabled>上一页</button>
+          <span id="pageInfo" class="page-info">—</span>
+          <button type="button" id="btnNext" class="btn btn-sm" disabled>下一页</button>
+        </div>
+      </aside>
+
+      <section class="pane detail-pane">
+        <div id="detailEmpty" class="detail-empty">
+          <p>从左侧选择一条任务查看审核结果</p>
+        </div>
+        <div id="detailContent" hidden>
+          <div class="detail-head">
+            <div>
+              <h2 id="detailId"></h2>
+              <div class="meta-row">
+                <span id="detailStatus" class="badge"></span>
+                <span id="detailTime" class="meta"></span>
+                <span id="detailCreated" class="meta"></span>
+              </div>
+              <a id="detailPdf" class="pdf-link" href="#" target="_blank" rel="noopener"></a>
+            </div>
+          </div>
+
+          <div id="detailError" class="error-box" hidden></div>
+
+          <div id="detailSummary" class="summary" hidden>
+            <div class="summary-stats">
+              <div class="stat">
+                <span class="stat-label">总数</span>
+                <span id="statTotal" class="stat-value">0</span>
+              </div>
+              <div class="stat ok">
+                <span class="stat-label">符合</span>
+                <span id="statPass" class="stat-value">0</span>
+              </div>
+              <div class="stat bad">
+                <span class="stat-label">不符合</span>
+                <span id="statFail" class="stat-value">0</span>
+              </div>
+            </div>
+            <div id="failChips" class="chips"></div>
+            <div class="rule-toolbar">
+              <div class="rule-filter">
+                <button type="button" class="chip-btn active" data-rule-filter="all">全部</button>
+                <button type="button" class="chip-btn" data-rule-filter="fail">仅不符合</button>
+                <button type="button" class="chip-btn" data-rule-filter="pass">仅符合</button>
+              </div>
+              <div class="rule-expand">
+                <button type="button" id="btnExpandAll" class="chip-btn">一键展开</button>
+                <button type="button" id="btnCollapseAll" class="chip-btn">一键收起</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="ruleList" class="rule-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

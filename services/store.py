@@ -114,6 +114,37 @@ def list_items_raw() -> list[tuple]:
         return cursor.fetchall()
 
 
+def list_items() -> list[dict]:
+    """结构化任务列表（不含完整 result，供前端列表使用）。"""
+    with _connect() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT item_id, pdf_url, status, error_message, processing_time, create_time,
+                   CASE WHEN result IS NOT NULL AND status = 'success' THEN 1 ELSE 0 END AS has_result
+            FROM audit_items
+            ORDER BY create_time DESC, item_id DESC
+            """
+        )
+        rows = cursor.fetchall()
+
+    items: list[dict] = []
+    for row in rows:
+        item_id, pdf_url, status, error_message, processing_time, create_time, has_result = row
+        items.append(
+            {
+                "item_id": item_id,
+                "pdf_url": pdf_url,
+                "status": status,
+                "error_message": error_message,
+                "processing_time": processing_time,
+                "create_time": create_time,
+                "has_result": bool(has_result),
+            }
+        )
+    return items
+
+
 def get_item(item_id: str) -> dict | None:
     """返回结构化任务记录；不存在返回 None。"""
     with _connect() as conn:
